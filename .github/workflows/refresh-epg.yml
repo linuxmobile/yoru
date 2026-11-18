@@ -1,0 +1,41 @@
+name: Refresh EPG
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: epg-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild XMLTV
+        run: python3 .github/scripts/build_epg_from_m3u.py --out-dir . --workers 6 --timeout 120
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add curated_epg.xml curated_epg.xml.gz curated_no_epg_epg.xml curated_no_epg_epg.xml.gz
+          if git diff --cached --quiet; then
+            echo "No EPG changes"
+            exit 0
+          fi
+          git commit -m "refresh EPG $(date -u +%Y-%m-%d)"
+          git push
