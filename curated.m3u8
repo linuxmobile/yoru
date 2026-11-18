@@ -1,4 +1,4 @@
-#EXTM3U x-tvg-url="curated_epg.xml" url-tvg="curated_epg.xml" tvg-url="curated_epg.xml"
+#EXTM3U x-tvg-url="https://raw.githubusercontent.com/linuxmobile/yoru/main/curated_epg.xml.gz" url-tvg="https://raw.githubusercontent.com/linuxmobile/yoru/main/curated_epg.xml.gz" tvg-url="https://raw.githubusercontent.com/linuxmobile/yoru/main/curated_epg.xml.gz"
 #EXTINF:-1 tvg-id="dummy-15607" tvg-name="####### ADULT ᴿᴬᵂ #######" tvg-logo="http://103.176.90.154/picons/logos/PPV/Max.png" group-title="General",####### ADULT ᴿᴬᵂ #######
 http://38.56.111.14:8000/play/a00z/index.m3u8
 #EXTINF:-1 tvg-id="26.TV.HD..uy" tvg-name="26 TV HD" tvg-logo="http://resources.nuevosiglo.com.uy/reportv/img/senales/2433.svg" group-title="General",26 TV HD
