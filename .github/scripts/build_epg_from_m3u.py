@@ -29,6 +29,12 @@ from typing import Any
 GZIP_MAGIC = b"\x1f\x8b"
 ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 DATE_RE = re.compile(r"^(\d{8})")
+STUB_MARKERS = (
+    "Overnight - Live TV",
+    "Morning - Live TV",
+    "Afternoon - Live TV",
+    "Evening - Live TV",
+)
 
 
 def log(message: str) -> None:
@@ -145,37 +151,48 @@ def parse_sources(
 ) -> tuple[dict[str, bytes], dict[str, int]]:
     programmes: dict[str, dict[tuple[str, str, str], bytes]] = {cid: {} for cid in wanted}
     counts: dict[str, int] = {}
-    today = datetime.now(timezone.utc).strftime("%Y%m%d")
 
     for path in paths:
         seen_in_source: set[str] = set()
+        current_programme: dict[str, str] | None = None
+        current_title = ""
         try:
             with open_auto(path) as fh:
-                context = ET.iterparse(fh, events=("end",))
-                for _, elem in context:
+                context = ET.iterparse(fh, events=("start", "end"))
+                _event, root = next(context)
+                for event, elem in context:
                     tag = strip_tag(elem.tag)
+                    if event == "start":
+                        if tag == "programme":
+                            current_programme = dict(elem.attrib)
+                            current_title = ""
+                        continue
                     if tag == "channel":
                         cid = (elem.get("id") or "").strip()
                         if cid in wanted:
                             seen_in_source.add(cid)
                         elem.clear()
+                        root.clear()
+                    elif tag == "title" and current_programme is not None:
+                        text = (elem.text or "").strip() or "".join(elem.itertext()).strip()
+                        if text:
+                            current_title = text
+                        elem.clear()
                     elif tag == "programme":
-                        cid = (elem.get("channel") or "").strip()
-                        if cid in wanted:
-                            title = "".join(elem.itertext()).strip()
-                            if title:
-                                start = elem.get("start") or ""
-                                stop = elem.get("stop") or ""
-                                match = DATE_RE.match(start)
-                                if match and match.group(1) >= today:
-                                    key = (start, stop, title)
-                                    if len(programmes[cid]) < max_per_channel:
-                                        programmes[cid][key] = ET.tostring(
-                                            elem, encoding="utf-8", short_empty_elements=False
-                                        )
+                        if current_programme is not None and current_title:
+                            cid = (current_programme.get("channel") or "").strip()
+                            if cid in wanted:
+                                start = current_programme.get("start") or ""
+                                stop = current_programme.get("stop") or ""
+                                key = (start, stop, current_title)
+                                if len(programmes[cid]) < max_per_channel:
+                                    programmes[cid][key] = serialise_programme_bytes(
+                                        start, stop, cid, current_title
+                                    )
+                        current_programme = None
+                        current_title = ""
                         elem.clear()
-                    else:
-                        elem.clear()
+                        root.clear()
         except Exception as exc:  # noqa: BLE001
             log(f"  skip malformed source {path.name}: {exc}")
             continue
@@ -186,6 +203,14 @@ def parse_sources(
         {cid: b"".join(items.values()) for cid, items in programmes.items()},
         counts,
     )
+
+
+def serialise_programme_bytes(start: str, stop: str, cid: str, title: str) -> bytes:
+    """Serialise a programme with a stable, non-empty <title> element."""
+    prog = ET.Element("programme", {"start": start, "stop": stop, "channel": cid})
+    node = ET.SubElement(prog, "title", {"lang": "en"})
+    node.text = title
+    return ET.tostring(prog, encoding="utf-8", short_empty_elements=False)
 
 
 def stub_programmes(cid: str, name: str, now: datetime) -> list[tuple[str, str, str]]:
@@ -252,7 +277,7 @@ def write_xmltv(
     gz_tmp.replace(path.with_name(path.name + ".gz"))
 
 
-def verify(m3u_path: Path, epg_path: Path) -> None:
+def verify(m3u_path: Path, epg_path: Path, require_real: bool = False) -> None:
     text = m3u_path.read_text(encoding="utf-8")
     header = text.splitlines()[0]
     if "https://" not in header:
@@ -261,6 +286,8 @@ def verify(m3u_path: Path, epg_path: Path) -> None:
     channel_ids: set[str] = set()
     titled = 0
     blank = 0
+    real = 0
+    stubs = 0
     seen_programme = False
     with gzip.open(epg_path, "rb") as fh:
         for _, elem in ET.iterparse(fh, events=("end",)):
@@ -275,15 +302,30 @@ def verify(m3u_path: Path, epg_path: Path) -> None:
                 title = elem.findtext("title")
                 if title and title.strip():
                     titled += 1
+                    clean = title.strip()
+                    if any(clean.endswith(marker) for marker in STUB_MARKERS):
+                        stubs += 1
+                    else:
+                        real += 1
                 else:
                     blank += 1
                 elem.clear()
     missing = ids - channel_ids
     if missing:
         raise RuntimeError(f"{m3u_path.name}: {len(missing)} ids missing in {epg_path.name}")
-    if not titled or blank:
+    if not titled or blank > max(10, titled // 10000):
         raise RuntimeError(f"{epg_path.name}: titled={titled}, blank={blank}")
-    log(f"verified {m3u_path.name}: {len(ids)} channels, {titled} titled programmes")
+    if require_real:
+        minimum_real = max(10000, titled // 20)
+        if real < minimum_real:
+            raise RuntimeError(
+                f"{epg_path.name}: only {real} real programmes out of {titled}; "
+                f"expected at least {minimum_real} (stub titles: {stubs})"
+            )
+    log(
+        f"verified {m3u_path.name}: {len(ids)} channels, {titled} titled programmes, "
+        f"{real} real, {stubs} stubs"
+    )
 
 
 def main() -> int:
@@ -326,7 +368,7 @@ def main() -> int:
     write_xmltv(out_dir / "curated_epg.xml", main_recs, programmes, False, now)
     write_xmltv(out_dir / "curated_no_epg_epg.xml", noepg_recs, {}, True, now)
 
-    verify(main_m3u, out_dir / "curated_epg.xml.gz")
+    verify(main_m3u, out_dir / "curated_epg.xml.gz", require_real=True)
     verify(noepg_m3u, out_dir / "curated_no_epg_epg.xml.gz")
     log("EPG rebuild complete")
     return 0
